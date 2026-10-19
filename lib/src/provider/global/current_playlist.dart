@@ -45,15 +45,24 @@ class CurrentPlaylistNotifier extends _$CurrentPlaylistNotifier {
             defaultValue: const CurrentPlaylistState(index: 0, playlist: []));
     debugPrint("current play list provider build");
     debugPrint('playerBackState: $playerBackState');
+    final trackId = ref.read(playerStateNotifierProvider).track?.bvid;
+    if (trackId != null) initilized = true;
     if (playerBackState == ap.PlayerState.completed) {
-      debugPrint('currentPlaylistState: ${currentPlaylistState.hasNext}');
-      if (currentPlaylistState.hasNext) {
-        final newState = currentPlaylistState.playNext();
-        ref.storage.custom["current_playlist_state"]!.put('default', newState);
-        return load();
-      } else {
-        return currentPlaylistState;
+      final ids = currentPlaylistState.playlist;
+      final savedIndex = currentPlaylistState.index;
+      final index = savedIndex >= 0 &&
+              savedIndex < ids.length &&
+              ids[savedIndex] == trackId
+          ? savedIndex
+          : ids.indexOf(trackId ?? '');
+      if (index < 0) return currentPlaylistState;
+      final active = CurrentPlaylistState(index: index, playlist: ids);
+      final next = active.hasNext ? active.playNext() : active;
+      if (next.index != savedIndex) {
+        ref.storage.custom["current_playlist_state"]!.put('default', next);
       }
+      if (!active.hasNext) return next;
+      return load(autoplay: true);
     } else if (playerBackState == ap.PlayerState.playing) {
       return currentPlaylistState;
     }
@@ -61,7 +70,6 @@ class CurrentPlaylistNotifier extends _$CurrentPlaylistNotifier {
     if (initilized) return currentPlaylistState;
     initilized = true;
     return load(autoplay: ref.read(autoplayOnStartupProvider));
-    // TODO fix: this load() cause play call twice when play next automatically
   }
 
   Future<void> play(String trackId, List<String> playlistTrackIds,
@@ -109,8 +117,9 @@ class CurrentPlaylistNotifier extends _$CurrentPlaylistNotifier {
             defaultValue: const CurrentPlaylistState(index: 0, playlist: []));
 
     if (currentPlaylistState.playlist.isEmpty) return currentPlaylistState;
-    if (currentPlaylistState.currentTrackId ==
-        ref.read(playerStateNotifierProvider.notifier).state.track?.bvid) {
+    final playback = ref.read(playerStateNotifierProvider);
+    if (currentPlaylistState.currentTrackId == playback.track?.bvid &&
+        playback.state != ap.PlayerState.completed) {
       return currentPlaylistState;
     }
 

@@ -16,6 +16,7 @@ class _Playback extends PlayerStateNotifier {
   final plays = <(String, bool)>[];
   Completer<void>? pending;
   Object? error;
+  bool stopBeforeLoad = false;
 
   @override
   PlayerState build() => PlayerState(
@@ -29,6 +30,10 @@ class _Playback extends PlayerStateNotifier {
   @override
   Future<void> playTrackById(String trackId, {bool autoplay = true}) async {
     plays.add((trackId, autoplay));
+    if (stopBeforeLoad) {
+      await Future<void>.value();
+      select(state.track?.bvid, ap.PlayerState.stopped);
+    }
     await pending?.future;
     if (error != null) throw error!;
     select(trackId, autoplay ? ap.PlayerState.playing : ap.PlayerState.paused);
@@ -186,5 +191,100 @@ void main() {
     expect(await queue.skip(-1), isTrue);
     expect(container.read(playerStateNotifierProvider).track!.bvid, 'middle');
     expect(queueBox.get('default')!.index, 1);
+  });
+  test('completion follows the actual song when the saved queue index is stale',
+      () async {
+    await queueBox.put(
+        'default',
+        const CurrentPlaylistState(
+            index: 0, playlist: ['first', 'middle', 'last']));
+    final subscription =
+        container.listen(currentPlaylistNotifierProvider, (_, __) {});
+    addTearDown(subscription.close);
+    playback.select('middle', ap.PlayerState.completed);
+    await container.pump();
+    await container.pump();
+    expect(playback.plays, [('last', true)]);
+    expect(queueBox.get('default')!.index, 2);
+    expect(container.read(playerStateNotifierProvider).state,
+        ap.PlayerState.playing);
+  });
+
+  test('finishing the final song stops even when the saved index is stale',
+      () async {
+    await queueBox.put(
+        'default',
+        const CurrentPlaylistState(
+            index: 0, playlist: ['first', 'middle', 'last']));
+    playback.select('last', ap.PlayerState.playing);
+    final subscription =
+        container.listen(currentPlaylistNotifierProvider, (_, __) {});
+    addTearDown(subscription.close);
+    playback.select('last', ap.PlayerState.completed);
+    await container.pump();
+    await container.pump();
+    expect(playback.plays, isEmpty);
+    expect(container.read(currentPlaylistNotifierProvider).index, 2);
+    expect(queueBox.get('default')!.index, 2);
+    expect(container.read(playerStateNotifierProvider).state,
+        ap.PlayerState.completed);
+  });
+
+  for (final startup in [null, false]) {
+    test(
+        'completion loads the next song once through stopped state with startup autoplay $startup',
+        () async {
+      if (startup != null) {
+        await container
+            .read(autoplayOnStartupProvider.notifier)
+            .setAutoplay(startup);
+      }
+      final subscription =
+          container.listen(currentPlaylistNotifierProvider, (_, __) {});
+      addTearDown(subscription.close);
+      playback.pending = Completer<void>();
+      playback.stopBeforeLoad = true;
+      playback.select('middle', ap.PlayerState.completed);
+      await container.pump();
+      await container.pump();
+      final requests = List.of(playback.plays);
+      playback.pending!.complete();
+      await container.pump();
+      await container.pump();
+      expect(requests, [('last', true)]);
+      expect(playback.plays, [('last', true)]);
+      expect(container.read(playerStateNotifierProvider).state,
+          ap.PlayerState.playing);
+      expect(queueBox.get('default')!.index, 2);
+    });
+  }
+
+  test(
+      'completion advances with only the application notifier subscription active',
+      () async {
+    final subscription =
+        container.listen(currentPlaylistNotifierProvider.notifier, (_, __) {});
+    addTearDown(subscription.close);
+    playback.select('middle', ap.PlayerState.completed);
+    await container.pump();
+    await container.pump();
+    expect(playback.plays, [('last', true)]);
+  });
+  test('adjacent entries of the same song still autoplay the next queue entry',
+      () async {
+    await queueBox.put(
+        'default',
+        const CurrentPlaylistState(
+            index: 0, playlist: ['middle', 'middle', 'last']));
+    final subscription =
+        container.listen(currentPlaylistNotifierProvider, (_, __) {});
+    addTearDown(subscription.close);
+    playback.select('middle', ap.PlayerState.completed);
+    await container.pump();
+    await container.pump();
+    expect(playback.plays, [('middle', true)]);
+    expect(queueBox.get('default')!.index, 1);
+    expect(container.read(playerStateNotifierProvider).state,
+        ap.PlayerState.playing);
   });
 }
