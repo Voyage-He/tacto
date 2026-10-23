@@ -15,6 +15,7 @@ import 'package:listen2/src/provider/repo/track.dart';
 class _Playback extends PlayerStateNotifier {
   final plays = <(String, bool)>[];
   Completer<void>? pending;
+  Completer<void>? started;
   Object? error;
   bool stopBeforeLoad = false;
 
@@ -30,6 +31,7 @@ class _Playback extends PlayerStateNotifier {
   @override
   Future<void> playTrackById(String trackId, {bool autoplay = true}) async {
     plays.add((trackId, autoplay));
+    started?.complete();
     if (stopBeforeLoad) {
       await Future<void>.value();
       select(state.track?.bvid, ap.PlayerState.stopped);
@@ -115,6 +117,9 @@ void main() {
     await container.pump();
     expect(playback.plays.last, ('middle', true));
     playback.select('middle', ap.PlayerState.completed);
+    await container
+        .read(currentPlaylistNotifierProvider.notifier)
+        .onTrackCompleted('middle');
     await container.pump();
     await container.pump();
     expect(playback.plays.last, ('last', true));
@@ -202,6 +207,9 @@ void main() {
         container.listen(currentPlaylistNotifierProvider, (_, __) {});
     addTearDown(subscription.close);
     playback.select('middle', ap.PlayerState.completed);
+    await container
+        .read(currentPlaylistNotifierProvider.notifier)
+        .onTrackCompleted('middle');
     await container.pump();
     await container.pump();
     expect(playback.plays, [('last', true)]);
@@ -221,6 +229,9 @@ void main() {
         container.listen(currentPlaylistNotifierProvider, (_, __) {});
     addTearDown(subscription.close);
     playback.select('last', ap.PlayerState.completed);
+    await container
+        .read(currentPlaylistNotifierProvider.notifier)
+        .onTrackCompleted('last');
     await container.pump();
     await container.pump();
     expect(playback.plays, isEmpty);
@@ -243,14 +254,16 @@ void main() {
           container.listen(currentPlaylistNotifierProvider, (_, __) {});
       addTearDown(subscription.close);
       playback.pending = Completer<void>();
+      playback.started = Completer<void>();
       playback.stopBeforeLoad = true;
       playback.select('middle', ap.PlayerState.completed);
-      await container.pump();
-      await container.pump();
+      final completion = container
+          .read(currentPlaylistNotifierProvider.notifier)
+          .onTrackCompleted('middle');
+      await playback.started!.future.timeout(const Duration(seconds: 5));
       final requests = List.of(playback.plays);
       playback.pending!.complete();
-      await container.pump();
-      await container.pump();
+      await completion;
       expect(requests, [('last', true)]);
       expect(playback.plays, [('last', true)]);
       expect(container.read(playerStateNotifierProvider).state,
@@ -259,17 +272,35 @@ void main() {
     });
   }
 
-  test(
-      'completion advances with only the application notifier subscription active',
+  test('completion advances without UI listeners or a provider frame pump',
       () async {
-    final subscription =
-        container.listen(currentPlaylistNotifierProvider.notifier, (_, __) {});
-    addTearDown(subscription.close);
+    final queue = container.read(currentPlaylistNotifierProvider.notifier);
     playback.select('middle', ap.PlayerState.completed);
-    await container.pump();
-    await container.pump();
+    await queue.onTrackCompleted('middle');
     expect(playback.plays, [('last', true)]);
   });
+
+  test('completion of an old source cannot advance the current record',
+      () async {
+    final queue = container.read(currentPlaylistNotifierProvider.notifier);
+    await queue.onTrackCompleted('first');
+    expect(playback.plays, isEmpty);
+    expect(queueBox.get('default')!.index, 1);
+  });
+
+  test('completion and manual skipping share the same navigation guard',
+      () async {
+    final queue = container.read(currentPlaylistNotifierProvider.notifier);
+    playback.pending = Completer<void>();
+    playback.select('middle', ap.PlayerState.completed);
+    final first = queue.onTrackCompleted('middle');
+    await queue.onTrackCompleted('middle');
+    expect(await queue.skip(1), isFalse);
+    playback.pending!.complete();
+    await first;
+    expect(playback.plays, [('last', true)]);
+  });
+
   test('adjacent entries of the same song still autoplay the next queue entry',
       () async {
     await queueBox.put(
@@ -280,6 +311,9 @@ void main() {
         container.listen(currentPlaylistNotifierProvider, (_, __) {});
     addTearDown(subscription.close);
     playback.select('middle', ap.PlayerState.completed);
+    await container
+        .read(currentPlaylistNotifierProvider.notifier)
+        .onTrackCompleted('middle');
     await container.pump();
     await container.pump();
     expect(playback.plays, [('middle', true)]);

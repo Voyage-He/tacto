@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:audio_service/audio_service.dart'
     show MediaControl, MediaItem, AudioProcessingState;
 import 'package:audioplayers/audioplayers.dart' as ap;
@@ -13,6 +15,8 @@ void main() {
   late AudioHandler handler;
   late List<MethodCall> calls;
   late List<int> skips;
+  late List<String> completions;
+  Completer<void>? completionPending;
   bool failSeek = false;
 
   void emit(String event, [Object? value]) {
@@ -26,6 +30,8 @@ void main() {
   setUp(() async {
     calls = [];
     skips = [];
+    completions = [];
+    completionPending = null;
     failSeek = false;
     binding.defaultBinaryMessenger
         .setMockMethodCallHandler(sessionChannel, (_) async => null);
@@ -44,7 +50,13 @@ void main() {
       if (call.method == 'setSourceUrl') emit('audio.onPrepared', true);
       return null;
     });
-    handler = AudioHandler(onSkip: (direction) async => skips.add(direction));
+    handler = AudioHandler(
+      onSkip: (direction) async => skips.add(direction),
+      onComplete: (trackId) async {
+        completions.add(trackId);
+        await completionPending?.future;
+      },
+    );
     await handler.initialize();
   });
 
@@ -91,6 +103,43 @@ void main() {
     await handler.skipToPrevious();
     await handler.skipToNext();
     expect(skips, [-1, 1]);
+  });
+
+  test('native completion reaches the queue without a widget frame', () async {
+    handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
+    await handler.load(ap.DeviceFileSource('/cache/song.m4a'));
+    emit('audio.onComplete');
+    await Future<void>.delayed(Duration.zero);
+    expect(completions, ['song']);
+  });
+
+  test('duplicate completions cannot overlap while the next song loads',
+      () async {
+    handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
+    await handler.load(ap.DeviceFileSource('/cache/song.m4a'));
+    completionPending = Completer<void>();
+    emit('audio.onComplete');
+    emit('audio.onComplete');
+    await Future<void>.delayed(Duration.zero);
+    expect(completions, ['song']);
+    completionPending!.complete();
+    await Future<void>.delayed(Duration.zero);
+    handler.mediaItem.add(const MediaItem(id: 'next', title: 'Next'));
+    await handler.player.release();
+    await handler.load(ap.DeviceFileSource('/cache/next.m4a'));
+    emit('audio.onComplete');
+    await Future<void>.delayed(Duration.zero);
+    expect(completions, ['song', 'next']);
+  });
+
+  test('explicit pause and stop never request automatic queue advancement',
+      () async {
+    handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
+    await handler.load(ap.DeviceFileSource('/cache/song.m4a'));
+    await handler.pause();
+    await handler.stop();
+    await Future<void>.delayed(Duration.zero);
+    expect(completions, isEmpty);
   });
 
   test('mounting a record with the needle raised never starts audio', () async {

@@ -1,4 +1,3 @@
-import 'package:flutter/widgets.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:audioplayers/audioplayers.dart' as ap;
 import 'package:listen2/src/provider/global/player.dart';
@@ -38,35 +37,11 @@ class CurrentPlaylistNotifier extends _$CurrentPlaylistNotifier {
 
   @override
   CurrentPlaylistState build() {
-    final playerBackState =
-        ref.watch(playerStateNotifierProvider.select((state) => state.state));
     final currentPlaylistState = ref.storage.custom["current_playlist_state"]!
         .get('default',
             defaultValue: const CurrentPlaylistState(index: 0, playlist: []));
-    debugPrint("current play list provider build");
-    debugPrint('playerBackState: $playerBackState');
-    final trackId = ref.read(playerStateNotifierProvider).track?.bvid;
-    if (trackId != null) initilized = true;
-    if (playerBackState == ap.PlayerState.completed) {
-      final ids = currentPlaylistState.playlist;
-      final savedIndex = currentPlaylistState.index;
-      final index = savedIndex >= 0 &&
-              savedIndex < ids.length &&
-              ids[savedIndex] == trackId
-          ? savedIndex
-          : ids.indexOf(trackId ?? '');
-      if (index < 0) return currentPlaylistState;
-      final active = CurrentPlaylistState(index: index, playlist: ids);
-      final next = active.hasNext ? active.playNext() : active;
-      if (next.index != savedIndex) {
-        ref.storage.custom["current_playlist_state"]!.put('default', next);
-      }
-      if (!active.hasNext) return next;
-      return load(autoplay: true);
-    } else if (playerBackState == ap.PlayerState.playing) {
-      return currentPlaylistState;
-    }
-
+    // Completion is handled by the audio service, without waiting for a UI frame.
+    if (ref.read(playerStateNotifierProvider).track != null) initilized = true;
     if (initilized) return currentPlaylistState;
     initilized = true;
     return load(autoplay: ref.read(autoplayOnStartupProvider));
@@ -76,13 +51,50 @@ class CurrentPlaylistNotifier extends _$CurrentPlaylistNotifier {
       {bool autoplay = true}) async {
     final index = playlistTrackIds.indexOf(trackId);
     if (index < 0) return;
-    final next =
-        CurrentPlaylistState(index: index, playlist: List.of(playlistTrackIds));
+    await _playAt(index, playlistTrackIds, autoplay: autoplay);
+  }
+
+  Future<void> _playAt(int index, List<String> ids,
+      {required bool autoplay}) async {
+    final next = CurrentPlaylistState(index: index, playlist: List.of(ids));
     await ref.storage.custom["current_playlist_state"]!.put('default', next);
     state = next;
     await ref
         .read(playerStateNotifierProvider.notifier)
-        .playTrackById(trackId, autoplay: autoplay);
+        .playTrackById(next.currentTrackId, autoplay: autoplay);
+  }
+
+  int _activeIndex(String trackId) {
+    final index = state.index;
+    final ids = state.playlist;
+    return index >= 0 && index < ids.length && ids[index] == trackId
+        ? index
+        : ids.indexOf(trackId);
+  }
+
+  /// Called directly by the native completion stream, including in the background.
+  Future<void> onTrackCompleted(String trackId) async {
+    if (_skipping) return;
+    final playback = ref.read(playerStateNotifierProvider);
+    if (playback.track?.bvid != trackId || playback.loading) return;
+    final index = _activeIndex(trackId);
+    if (index < 0) return;
+    final ids = List<String>.of(state.playlist);
+    _skipping = true;
+    try {
+      if (index == ids.length - 1) {
+        if (state.index != index) {
+          final last = CurrentPlaylistState(index: index, playlist: ids);
+          await ref.storage.custom["current_playlist_state"]!
+              .put('default', last);
+          state = last;
+        }
+        return;
+      }
+      await _playAt(index + 1, ids, autoplay: true);
+    } finally {
+      _skipping = false;
+    }
   }
 
   /// Share queue navigation between the record gestures and system controls.
@@ -92,12 +104,12 @@ class CurrentPlaylistNotifier extends _$CurrentPlaylistNotifier {
     final playback = ref.read(playerStateNotifierProvider);
     final track = playback.track;
     if (track == null) return false;
-    final index = playlist.indexOf(track.bvid);
+    final index = _activeIndex(track.bvid);
     final next = index + direction;
     if (index < 0 || next < 0 || next >= playlist.length) return false;
     _skipping = true;
     try {
-      await play(playlist[next], playlist,
+      await _playAt(next, playlist,
           autoplay: playback.state == ap.PlayerState.playing);
       return true;
     } finally {
@@ -126,7 +138,6 @@ class CurrentPlaylistNotifier extends _$CurrentPlaylistNotifier {
     ref
         .read(playerStateNotifierProvider.notifier)
         .playTrackById(currentPlaylistState.currentTrackId, autoplay: autoplay);
-    debugPrint('load call time');
     return currentPlaylistState;
   }
 }

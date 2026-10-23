@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:audioplayers/audioplayers.dart' as ap;
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
+import 'package:flutter/foundation.dart';
 import 'package:listen2/src/provider/global/current_playlist.dart';
 import 'package:listen2/src/provider/repo/track.dart';
 import 'package:path/path.dart' as path;
@@ -51,10 +52,15 @@ class _RecordScrub {
 
 /// Connects the player to iOS Now Playing and Android media controls.
 class AudioHandler extends BaseAudioHandler {
-  AudioHandler({Future<void> Function(int direction)? onSkip})
-      : _onSkip = onSkip;
+  AudioHandler({
+    Future<void> Function(int direction)? onSkip,
+    Future<void> Function(String trackId)? onComplete,
+  })  : _onSkip = onSkip,
+        _onComplete = onComplete;
 
   final Future<void> Function(int direction)? _onSkip;
+  final Future<void> Function(String trackId)? _onComplete;
+  bool _handlingCompletion = false;
   final player = ap.AudioPlayer();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   bool _resumeAfterInterruption = false;
@@ -167,6 +173,23 @@ class AudioHandler extends BaseAudioHandler {
     await session.configure(const AudioSessionConfiguration.music());
     _subscriptions.add(player.onPlayerStateChanged.listen((state) {
       _publishState(state);
+    }));
+    _subscriptions.add(player.onPlayerComplete.listen((_) async {
+      final trackId = mediaItem.value?.id;
+      if (trackId == null || _handlingCompletion) return;
+      _handlingCompletion = true;
+      try {
+        await _onComplete?.call(trackId);
+      } catch (error, stack) {
+        FlutterError.reportError(FlutterErrorDetails(
+          exception: error,
+          stack: stack,
+          library: 'background audio',
+          context: ErrorDescription('while advancing to the next track'),
+        ));
+      } finally {
+        _handlingCompletion = false;
+      }
     }));
     _subscriptions.add(player.onPositionChanged.listen((position) {
       playbackState.add(playbackState.value.copyWith(updatePosition: position));
@@ -407,9 +430,18 @@ class PlayerStateNotifier extends _$PlayerStateNotifier {
 @Riverpod(keepAlive: true)
 Future<AudioHandler> audioHandler(AudioHandlerRef ref) async {
   final handler = await AudioService.init(
-    builder: () => AudioHandler(onSkip: (direction) async {
-      await ref.read(currentPlaylistNotifierProvider.notifier).skip(direction);
-    }),
+    builder: () => AudioHandler(
+      onSkip: (direction) async {
+        await ref
+            .read(currentPlaylistNotifierProvider.notifier)
+            .skip(direction);
+      },
+      onComplete: (trackId) async {
+        await ref
+            .read(currentPlaylistNotifierProvider.notifier)
+            .onTrackCompleted(trackId);
+      },
+    ),
     config: const AudioServiceConfig(androidStopForegroundOnPause: false),
   );
   await handler.initialize();
