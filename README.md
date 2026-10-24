@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href=".fvmrc"><img src="https://img.shields.io/badge/Flutter-3.24.1-02569B?style=flat-square&amp;logo=flutter&amp;logoColor=white" alt="Flutter 3.24.1"></a>
-  <a href="pubspec.yaml"><img src="https://img.shields.io/badge/Version-0.9.3-657153?style=flat-square" alt="Version 0.9.3"></a>
+  <a href="pubspec.yaml"><img src="https://img.shields.io/badge/Version-0.9.4-657153?style=flat-square" alt="Version 0.9.4"></a>
   <a href="docs/development.md"><img src="https://img.shields.io/badge/Platforms-Android%20%7C%20iOS%20%7C%20Windows-59646B?style=flat-square" alt="Platforms: Android, iOS, Windows"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSD--3--Clause-C49A45?style=flat-square" alt="License: BSD 3-Clause"></a>
   <a href="#一台可以随身带走的唱片机"><img src="https://img.shields.io/badge/Controls-Buttonless-BC7354?style=flat-square" alt="Controls: Buttonless"></a>
