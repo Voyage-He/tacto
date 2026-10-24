@@ -4,6 +4,7 @@ import 'package:audio_service/audio_service.dart'
     show MediaControl, MediaItem, AudioProcessingState;
 import 'package:audioplayers/audioplayers.dart' as ap;
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:listen2/src/provider/global/player.dart';
 
@@ -18,6 +19,10 @@ void main() {
   late List<String> completions;
   Completer<void>? completionPending;
   bool failSeek = false;
+  bool failCompletion = false;
+  bool loadAfterCompletion = false;
+  late List<String> transitionCalls;
+  const transitionChannel = MethodChannel('tacto/audio_transition');
 
   void emit(String event, [Object? value]) {
     binding.channelBuffers.push(
@@ -33,6 +38,11 @@ void main() {
     completions = [];
     completionPending = null;
     failSeek = false;
+    failCompletion = false;
+    loadAfterCompletion = false;
+    transitionCalls = [];
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        transitionChannel, (call) async => transitionCalls.add(call.method));
     binding.defaultBinaryMessenger
         .setMockMethodCallHandler(sessionChannel, (_) async => null);
     binding.defaultBinaryMessenger.setMockMethodCallHandler(playerChannel,
@@ -55,13 +65,21 @@ void main() {
       onComplete: (trackId) async {
         completions.add(trackId);
         await completionPending?.future;
+        if (failCompletion) throw StateError('next track unavailable');
+        if (loadAfterCompletion) {
+          handler.mediaItem.add(const MediaItem(id: 'next', title: 'Next'));
+          await handler.load(ap.DeviceFileSource('/cache/next.m4a'));
+        }
       },
     );
     await handler.initialize();
   });
 
   tearDown(() async {
+    debugDefaultTargetPlatformOverride = null;
     await handler.dispose();
+    binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(transitionChannel, null);
     binding.defaultBinaryMessenger
         .setMockMethodCallHandler(playerChannel, null);
     binding.defaultBinaryMessenger
@@ -130,6 +148,94 @@ void main() {
     emit('audio.onComplete');
     await Future<void>.delayed(Duration.zero);
     expect(completions, ['song', 'next']);
+  });
+
+  test('loading another source can resume directly from completed state',
+      () async {
+    handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
+    await handler.load(ap.DeviceFileSource('/cache/song.m4a'));
+    emit('audio.onComplete');
+    await Future<void>.delayed(Duration.zero);
+    calls.clear();
+    await handler.load(ap.DeviceFileSource('/cache/next.m4a'));
+    expect(handler.player.state, ap.PlayerState.playing);
+    expect(
+        calls
+            .where((call) => call.method == 'release' || call.method == 'stop'),
+        isEmpty);
+  });
+
+  test('iOS task spans next-track preparation and always ends after loading',
+      () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
+    await handler.load(ap.DeviceFileSource('/cache/song.m4a'));
+    completionPending = Completer<void>();
+    loadAfterCompletion = true;
+    emit('audio.onComplete');
+    await Future<void>.delayed(Duration.zero);
+    expect(transitionCalls, ['begin']);
+    expect(handler.playbackState.value.processingState,
+        AudioProcessingState.loading);
+    expect(handler.playbackState.value.playing, isTrue);
+    completionPending!.complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(transitionCalls, ['begin', 'end']);
+    expect(handler.player.state, ap.PlayerState.playing);
+    expect(handler.playbackState.value.processingState,
+        AudioProcessingState.ready);
+  });
+
+  test('pause during automatic preparation keeps the new song paused',
+      () async {
+    handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
+    await handler.load(ap.DeviceFileSource('/cache/song.m4a'));
+    completionPending = Completer<void>();
+    loadAfterCompletion = true;
+    emit('audio.onComplete');
+    await Future<void>.delayed(Duration.zero);
+    await handler.pause();
+    completionPending!.complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(handler.player.state, ap.PlayerState.paused);
+    expect(handler.playbackState.value.playing, isFalse);
+  });
+
+  test('stop during automatic preparation cannot restart playback', () async {
+    handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
+    await handler.load(ap.DeviceFileSource('/cache/song.m4a'));
+    completionPending = Completer<void>();
+    loadAfterCompletion = true;
+    emit('audio.onComplete');
+    await Future<void>.delayed(Duration.zero);
+    await handler.stop();
+    calls.clear();
+    completionPending!.complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(handler.player.state, ap.PlayerState.stopped);
+    expect(
+        handler.playbackState.value.processingState, AudioProcessingState.idle);
+    expect(calls.where((call) => call.method == 'resume'), isEmpty);
+  });
+
+  test('failed completion releases the bounded iOS background task', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
+    await handler.load(ap.DeviceFileSource('/cache/song.m4a'));
+    failCompletion = true;
+    final errors = <FlutterErrorDetails>[];
+    final original = FlutterError.onError;
+    FlutterError.onError = errors.add;
+    try {
+      emit('audio.onComplete');
+      await Future<void>.delayed(Duration.zero);
+      expect(transitionCalls, ['begin', 'end']);
+      expect(errors.single.exception, isA<StateError>());
+      expect(handler.playbackState.value.processingState,
+          AudioProcessingState.completed);
+    } finally {
+      FlutterError.onError = original;
+    }
   });
 
   test('explicit pause and stop never request automatic queue advancement',

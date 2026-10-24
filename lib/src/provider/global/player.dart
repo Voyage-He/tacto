@@ -6,6 +6,7 @@ import 'package:audioplayers/audioplayers.dart' as ap;
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:listen2/src/provider/global/current_playlist.dart';
 import 'package:listen2/src/provider/repo/track.dart';
 import 'package:path/path.dart' as path;
@@ -61,6 +62,10 @@ class AudioHandler extends BaseAudioHandler {
   final Future<void> Function(int direction)? _onSkip;
   final Future<void> Function(String trackId)? _onComplete;
   bool _handlingCompletion = false;
+  bool _loadingSource = false;
+  bool _playWhenReady = false;
+  bool _stopped = false;
+  static const _transitionChannel = MethodChannel('tacto/audio_transition');
   final player = ap.AudioPlayer();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   bool _resumeAfterInterruption = false;
@@ -172,14 +177,27 @@ class AudioHandler extends BaseAudioHandler {
     final session = await AudioSession.instance;
     await session.configure(const AudioSessionConfiguration.music());
     _subscriptions.add(player.onPlayerStateChanged.listen((state) {
-      _publishState(state);
+      // Completion has its own transition below. Do not briefly tell iOS that
+      // playback ended before the queue has decided whether there is a next item.
+      if (state != ap.PlayerState.completed ||
+          _onComplete == null ||
+          mediaItem.value == null) {
+        _publishState(state);
+      }
     }));
     _subscriptions.add(player.onPlayerComplete.listen((_) async {
       final trackId = mediaItem.value?.id;
       if (trackId == null || _handlingCompletion) return;
+      if (_onComplete == null) return;
       _handlingCompletion = true;
+      _publishState(player.state);
       try {
-        await _onComplete?.call(trackId);
+        // iOS can suspend Dart while the next file is downloaded/prepared.
+        // This bounded native task covers the silent interval between tracks.
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          await _transitionChannel.invokeMethod<void>('begin');
+        }
+        await _onComplete.call(trackId);
       } catch (error, stack) {
         FlutterError.reportError(FlutterErrorDetails(
           exception: error,
@@ -188,7 +206,14 @@ class AudioHandler extends BaseAudioHandler {
           context: ErrorDescription('while advancing to the next track'),
         ));
       } finally {
-        _handlingCompletion = false;
+        try {
+          if (defaultTargetPlatform == TargetPlatform.iOS) {
+            await _transitionChannel.invokeMethod<void>('end');
+          }
+        } finally {
+          _handlingCompletion = false;
+          _publishState(player.state);
+        }
       }
     }));
     _subscriptions.add(player.onPositionChanged.listen((position) {
@@ -227,7 +252,9 @@ class AudioHandler extends BaseAudioHandler {
   }
 
   void _publishState(ap.PlayerState state) {
-    final playing = state == ap.PlayerState.playing;
+    final transitioning = !_stopped && (_loadingSource || _handlingCompletion);
+    final playing = !_stopped &&
+        (transitioning ? _playWhenReady : state == ap.PlayerState.playing);
     playbackState.add(playbackState.value.copyWith(
       controls: [
         MediaControl.skipToPrevious,
@@ -238,11 +265,16 @@ class AudioHandler extends BaseAudioHandler {
       systemActions: const {MediaAction.seek},
       androidCompactActionIndices: const [0, 1, 2],
       playing: playing,
-      processingState: state == ap.PlayerState.completed
-          ? AudioProcessingState.completed
-          : state == ap.PlayerState.stopped || state == ap.PlayerState.disposed
-              ? AudioProcessingState.idle
-              : AudioProcessingState.ready,
+      processingState: _stopped
+          ? AudioProcessingState.idle
+          : transitioning
+              ? AudioProcessingState.loading
+              : state == ap.PlayerState.completed
+                  ? AudioProcessingState.completed
+                  : state == ap.PlayerState.stopped ||
+                          state == ap.PlayerState.disposed
+                      ? AudioProcessingState.idle
+                      : AudioProcessingState.ready,
     ));
   }
 
@@ -260,12 +292,16 @@ class AudioHandler extends BaseAudioHandler {
 
   @override
   Future<void> play() async {
+    _playWhenReady = true;
+    _stopped = false;
     await cancelScrub();
     await _playReady();
   }
 
-  Future<void> _playReady({bool Function()? allowed}) async {
-    if (player.source == null || player.state == ap.PlayerState.completed) {
+  Future<void> _playReady(
+      {bool Function()? allowed, bool sourceJustLoaded = false}) async {
+    if (player.source == null ||
+        (player.state == ap.PlayerState.completed && !sourceJustLoaded)) {
       return;
     }
     final session = await AudioSession.instance;
@@ -277,16 +313,34 @@ class AudioHandler extends BaseAudioHandler {
   /// Mount a record without spinning it when the needle is raised.
   Future<void> load(ap.Source source, {bool autoplay = true}) async {
     await cancelScrub();
-    await player.setSource(source);
-    if (autoplay) {
-      await play();
-    } else {
-      await pause();
+    if (_handlingCompletion && _stopped) return;
+    if (!_handlingCompletion) {
+      _playWhenReady = autoplay;
+      _stopped = false;
+    }
+    _loadingSource = true;
+    _publishState(player.state);
+    try {
+      // Replacing AVPlayerItem is sufficient. release() also stops/seeks the old
+      // item and publishes idle, which tears down the system audio service.
+      await player.pause();
+      if (_stopped) return;
+      await player.setSource(source);
+      if (_stopped) return;
+      if (_playWhenReady) {
+        await _playReady(sourceJustLoaded: true, allowed: () => _playWhenReady);
+      } else {
+        await player.pause();
+      }
+    } finally {
+      _loadingSource = false;
+      _publishState(player.state);
     }
   }
 
   @override
   Future<void> pause() async {
+    _playWhenReady = false;
     _resumeAfterInterruption = false;
     await cancelScrub();
     await player.pause();
@@ -307,6 +361,8 @@ class AudioHandler extends BaseAudioHandler {
 
   @override
   Future<void> stop() async {
+    _playWhenReady = false;
+    _stopped = true;
     _resumeAfterInterruption = false;
     await cancelScrub();
     await player.stop();
@@ -370,9 +426,6 @@ class PlayerStateNotifier extends _$PlayerStateNotifier {
         source = ap.DeviceFileSource(file.path);
       }
       if (request != _playRequest) return;
-      await _audioHandler.player.release();
-      if (request != _playRequest) return;
-
       state = PlayerState(track: track, loading: true);
       _audioHandler.mediaItem.add(MediaItem(
         id: track.bvid,
