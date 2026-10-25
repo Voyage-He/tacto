@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:listen2/src/playback_diagnostics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
@@ -131,6 +133,45 @@ void main() {
     expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
     expect(find.text('播放设置保存失败，请重试'), findsOneWidget);
     expect(tester.widget<SwitchListTile>(toggle).onChanged, isNotNull);
+    expect(tester.takeException(), isNull);
+  });
+  testWidgets('playback diagnostics are copied only on request and allow retry',
+      (tester) async {
+    String? copied;
+    var failCopy = false;
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        if (failCopy) throw PlatformException(code: 'clipboard_unavailable');
+        copied = (call.arguments as Map)['text'] as String;
+      }
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
+    playbackDiagnostics.record('test-stage',
+        error: StateError('private-value'));
+    await tester.pumpWidget(UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+            theme: AppStyle.theme, home: const Scaffold(body: Option()))));
+    await tester.pumpAndSettle();
+    expect(copied, isNull);
+    final button = find.byKey(const ValueKey('copy-playback-diagnostics'));
+    await tester.ensureVisible(button);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    final report = jsonDecode(copied!) as Map;
+    expect(report['format'], 'tacto-playback-diagnostics-v1');
+    expect(report['playback']['state'], 'stopped');
+    expect(copied, isNot(contains('private-value')));
+    expect(find.text('播放诊断已复制，可粘贴发送'), findsOneWidget);
+    failCopy = true;
+    await tester.ensureVisible(button);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(find.text('复制失败，请重试'), findsOneWidget);
+    expect(tester.widget<ListTile>(button).enabled, isTrue);
     expect(tester.takeException(), isNull);
   });
 }

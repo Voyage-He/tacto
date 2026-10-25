@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive/hive.dart';
 import 'package:listen2/src/provider/global/player.dart';
+import 'package:listen2/src/playback_diagnostics.dart';
 import 'package:listen2/src/provider/global/current_playlist.dart';
 import 'package:listen2/src/provider/global/storage.dart';
 import 'package:listen2/src/provider/repo/bilibili.dart';
@@ -122,6 +123,12 @@ Future<void> main() async {
       final status = await const MethodChannel('tacto/audio_transition')
           .invokeMapMethod<String, dynamic>('status');
       trace('nowPlaying', {'id': id, ...?status});
+      if (id == 'native-probe-2') {
+        final report = await playbackDiagnostics.exportReport();
+        await File('${directory.path}/diagnostic-report.json')
+            .writeAsString(report);
+        trace('diagnosticExport', 'diagnostic-report.json');
+      }
     }
   });
   queueBox

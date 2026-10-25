@@ -8,6 +8,7 @@ import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:listen2/src/provider/global/current_playlist.dart';
+import 'package:listen2/src/playback_diagnostics.dart';
 import 'package:listen2/src/provider/repo/track.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
@@ -16,9 +17,7 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 part 'player.g.dart';
 
 void _traceAudio(String stage, {String? trackId, Object? error}) {
-  // Transport stages only: no credentials, request headers or signed media URLs.
-  debugPrint('TactoAudio stage=$stage id=${trackId ?? '-'}'
-      '${error == null ? '' : ' error=${error.runtimeType}'}');
+  playbackDiagnostics.record(stage, trackId: trackId, error: error);
 }
 
 class PlayerState {
