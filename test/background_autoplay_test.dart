@@ -13,6 +13,41 @@ import 'package:listen2/src/provider/global/player.dart';
 import 'package:listen2/src/provider/global/playback_settings.dart';
 import 'package:listen2/src/provider/global/storage.dart';
 import 'package:listen2/src/provider/repo/track.dart';
+import 'package:listen2/src/provider/repo/bilibili.dart';
+import 'package:music_api/music_api.dart';
+
+class _Client extends BilibiliClient {
+  _Client(super.box);
+  final downloads = <String>[];
+
+  @override
+  Future<Stream> getAudioStream(String id) async {
+    downloads.add(id);
+    await Future<void>.value();
+    if (id == 'last' && downloads.where((value) => value == id).length == 1) {
+      throw StateError('speculative download failed');
+    }
+    return Stream<List<int>>.value(Uint8List(4));
+  }
+}
+
+class _ClientNotifier extends BilibiliClientNotifier {
+  _ClientNotifier(this.client);
+  final BilibiliClient client;
+  @override
+  Future<BilibiliClient> build() async => client;
+}
+
+Future<void> _until(bool Function() ready) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (!ready()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Next-track preparation did not finish without a UI frame');
+    }
+    await Future<void>.delayed(Duration.zero);
+  }
+  await Future<void>.delayed(Duration.zero);
+}
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
@@ -30,6 +65,8 @@ void main() {
   late AudioHandler handler;
   late List<MethodCall> serviceCalls;
   late List<String> commands;
+  late _Client client;
+  late Storage storage;
 
   void emit(String event, [Object? value]) {
     binding.channelBuffers.push(
@@ -62,10 +99,7 @@ void main() {
     final value = await Hive.openBox('value');
     queueBox =
         await Hive.openBox<CurrentPlaylistState>('current_playlist_state');
-    final storage = Storage(
-        value,
-        value,
-        await Hive.openBox<Uint8List>('binary'),
+    storage = Storage(value, value, await Hive.openBox<Uint8List>('binary'),
         {'current_playlist_state': queueBox});
     binding.defaultBinaryMessenger
         .setMockMethodCallHandler(sessionChannel, (_) async => null);
@@ -81,16 +115,17 @@ void main() {
       if (call.method == 'setSourceBytes') emit('audio.onPrepared', true);
       return null;
     });
+    client = _Client(value);
     container = ProviderContainer(overrides: [
+      bilibiliClientNotifierProvider
+          .overrideWith(() => _ClientNotifier(client)),
       hiveStorageProvider.overrideWith((ref) async => storage),
       for (final id in ['first', 'middle', 'last'])
         trackProvider(id).overrideWith((ref) async =>
             Track(id, id, 'Artist', 'file:///tmp/tacto-cover.png')),
     ]);
     await container.read(hiveStorageProvider.future);
-    for (final id in ['first', 'middle', 'last']) {
-      await storage.binary.put(id, Uint8List(4));
-    }
+    await storage.binary.put('first', Uint8List(4));
     handler = await container.read(audioHandlerProvider.future);
     container.read(playerStateNotifierProvider);
     // The startup preference must not suppress continuation of an active queue.
@@ -117,10 +152,14 @@ void main() {
     await directory.delete(recursive: true);
   });
 
-  test('background completion preserves the actual system audio service',
+  test('preparation and retry preserve the actual background audio service',
       () async {
     binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
     expect(binding.framesEnabled, isFalse);
+    await _until(() => storage.binary.containsKey('middle'));
+    expect(client.downloads, ['middle']);
+    expect(handler.mediaItem.value!.id, 'first');
+    expect(handler.player.state, ap.PlayerState.playing);
     for (final (index, id) in [(1, 'middle'), (2, 'last')]) {
       final playing = handler.playbackState.firstWhere((state) =>
           state.playing &&
@@ -135,11 +174,18 @@ void main() {
       expect(playback.state, ap.PlayerState.playing);
       expect(queueBox.get('default')!.index, index);
       expect(binding.framesEnabled, isFalse);
+      if (id == 'middle') {
+        // Speculative failure must not pause the current song. The next real
+        // completion retries this failed provider without needing a UI frame.
+        await _until(() => client.downloads.contains('last'));
+        expect(handler.player.state, ap.PlayerState.playing);
+      }
       expect(
           serviceCalls.where((call) => call.method == 'stopService'), isEmpty,
           reason: 'Switching tracks must not clear iOS Now Playing');
     }
     expect(commands.where((command) => command == 'resume'), hasLength(3));
+    expect(client.downloads, ['middle', 'last', 'last']);
     expect(
         commands.where((command) => command == 'release' || command == 'stop'),
         isEmpty);

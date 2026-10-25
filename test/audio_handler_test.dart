@@ -238,6 +238,42 @@ void main() {
     }
   });
 
+  test('iOS obtains protection before audio ends and does not pile up tasks',
+      () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
+    await handler.load(ap.DeviceFileSource('/cache/song.m4a'));
+    emit('audio.onDuration', 20000);
+    emit('audio.onCurrentPosition', 14000);
+    await Future<void>.delayed(Duration.zero);
+    expect(transitionCalls, isEmpty);
+    emit('audio.onCurrentPosition', 16000);
+    emit('audio.onCurrentPosition', 18000);
+    await Future<void>.delayed(Duration.zero);
+    expect(handler.player.state, ap.PlayerState.playing);
+    expect(completions, isEmpty);
+    expect(transitionCalls, ['begin']);
+    await handler.pause();
+    expect(transitionCalls, ['begin', 'end']);
+  });
+
+  test('seeking away releases the tail protection and permits a later guard',
+      () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
+    await handler.load(ap.DeviceFileSource('/cache/song.m4a'));
+    emit('audio.onDuration', 20000);
+    emit('audio.onCurrentPosition', 16000);
+    await Future<void>.delayed(Duration.zero);
+    await handler.seek(const Duration(seconds: 2));
+    expect(transitionCalls, ['begin', 'end']);
+    emit('audio.onCurrentPosition', 17000);
+    await Future<void>.delayed(Duration.zero);
+    expect(transitionCalls, ['begin', 'end', 'begin']);
+    await handler.stop();
+    expect(transitionCalls, ['begin', 'end', 'begin', 'end']);
+  });
+
   test('explicit pause and stop never request automatic queue advancement',
       () async {
     handler.mediaItem.add(const MediaItem(id: 'song', title: 'Song'));
