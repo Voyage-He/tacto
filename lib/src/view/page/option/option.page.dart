@@ -8,6 +8,7 @@ import 'package:listen2/src/playlist_backup.dart';
 import 'package:listen2/src/provider/repo/playlist_tracks_id.dart';
 import 'package:listen2/src/provider/global/background_settings.dart';
 import 'package:listen2/src/provider/global/playback_settings.dart';
+import 'package:listen2/src/widget/app_version.dart';
 import 'package:listen2/src/widget/player_background.dart';
 import 'package:listen2/src/view/page/option/bilibili_account.page.dart';
 
@@ -200,6 +201,7 @@ class _OptionState extends ConsumerState<Option> {
                     padding: const EdgeInsets.symmetric(vertical: 24),
                     child: Text(_message!,
                         style: Theme.of(context).textTheme.bodyLarge)),
+              const AppVersionFooter(),
             ])),
       ],
     ));

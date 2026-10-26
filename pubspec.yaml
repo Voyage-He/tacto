@@ -56,6 +56,7 @@ dependencies:
   qr_flutter: ^4.1.0
   flutter_secure_storage: ^9.2.4
   flutter_svg: 2.0.9
+  package_info_plus: ^9.0.1
 
 dev_dependencies:
   flutter_test:
