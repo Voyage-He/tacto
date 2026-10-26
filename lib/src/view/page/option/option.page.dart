@@ -2,10 +2,6 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:listen2/src/playback_diagnostics.dart';
-import 'package:listen2/src/provider/global/player.dart';
-import 'package:listen2/src/provider/global/current_playlist.dart';
 import 'package:listen2/src/widget/app_style.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:listen2/src/playlist_backup.dart';
@@ -28,42 +24,6 @@ class _OptionState extends ConsumerState<Option> {
   String? _backgroundError;
   bool _savingPlayback = false;
   String? _playbackError;
-  bool _copyingDiagnostics = false;
-  String? _diagnosticsMessage;
-
-  Future<void> _copyDiagnostics() async {
-    if (_copyingDiagnostics) return;
-    setState(() {
-      _copyingDiagnostics = true;
-      _diagnosticsMessage = null;
-    });
-    try {
-      final playback = ref.read(playerStateNotifierProvider);
-      final queue = playback.track == null
-          ? null
-          : ref.read(currentPlaylistNotifierProvider);
-      final report = await playbackDiagnostics.exportReport(playback: {
-        'state': playback.state.name,
-        'trackId': playback.track?.bvid,
-        'loading': playback.loading,
-        'positionMs': playback.now.inMilliseconds,
-        'durationMs': playback.length.inMilliseconds,
-        if (queue != null) 'queueIndex': queue.index,
-        if (queue != null) 'queueLength': queue.playlist.length,
-      });
-      await Clipboard.setData(ClipboardData(text: report));
-      if (mounted) {
-        setState(() => _diagnosticsMessage = '播放诊断已复制，可粘贴发送');
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() => _diagnosticsMessage = '复制失败，请重试');
-      }
-    } finally {
-      if (mounted) setState(() => _copyingDiagnostics = false);
-    }
-  }
-
   Future<void> _setAutoplay(bool enabled) async {
     if (_savingPlayback) return;
     setState(() {
@@ -176,37 +136,6 @@ class _OptionState extends ConsumerState<Option> {
                     child: Text(_playbackError!,
                         style: TextStyle(
                             color: Theme.of(context).colorScheme.error))),
-              const SizedBox(height: 12),
-              Material(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                child: ListTile(
-                  key: const ValueKey('copy-playback-diagnostics'),
-                  enabled: !_copyingDiagnostics,
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(18)),
-                  leading: const Icon(Icons.receipt_long_outlined,
-                      color: AppStyle.accent),
-                  title: const Text('复制播放诊断',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
-                  subtitle: const Text('复现问题后复制记录，帮助定位续播问题'),
-                  trailing: _copyingDiagnostics
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.copy_outlined),
-                  onTap: _copyingDiagnostics ? null : _copyDiagnostics,
-                ),
-              ),
-              if (_diagnosticsMessage != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Text(_diagnosticsMessage!,
-                      key: const ValueKey('playback-diagnostics-message')),
-                ),
               const SizedBox(height: 28),
               Text('背景外观', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),

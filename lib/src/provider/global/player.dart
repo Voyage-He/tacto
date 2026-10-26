@@ -8,17 +8,12 @@ import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:listen2/src/provider/global/current_playlist.dart';
-import 'package:listen2/src/playback_diagnostics.dart';
 import 'package:listen2/src/provider/repo/track.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 part 'player.g.dart';
-
-void _traceAudio(String stage, {String? trackId, Object? error}) {
-  playbackDiagnostics.record(stage, trackId: trackId, error: error);
-}
 
 class PlayerState {
   ap.PlayerState state;
@@ -198,7 +193,6 @@ class AudioHandler extends BaseAudioHandler {
     }));
     _subscriptions.add(player.onPlayerComplete.listen((_) async {
       final trackId = mediaItem.value?.id;
-      _traceAudio('native-complete', trackId: trackId);
       if (trackId == null || _handlingCompletion) return;
       if (_onComplete == null) return;
       _handlingCompletion = true;
@@ -210,9 +204,7 @@ class AudioHandler extends BaseAudioHandler {
           await _transitionChannel.invokeMethod<void>('begin');
         }
         await _onComplete.call(trackId);
-        _traceAudio('queue-complete', trackId: mediaItem.value?.id);
       } catch (error, stack) {
-        _traceAudio('queue-failed', trackId: trackId, error: error);
         FlutterError.reportError(FlutterErrorDetails(
           exception: error,
           stack: stack,
@@ -283,11 +275,9 @@ class AudioHandler extends BaseAudioHandler {
     // Ask while audio is still active; asking only after completion is too late
     // if iOS has already suspended the Flutter isolate during the silent gap.
     _tailGuardTrackId = item.id;
-    _traceAudio('tail-protected', trackId: item.id);
     unawaited(_transitionChannel.invokeMethod<void>(
-        'begin', {'origin': 'track-tail'}).catchError((Object error) {
+        'begin', {'origin': 'track-tail'}).catchError((Object _) {
       if (_tailGuardTrackId == item.id) _tailGuardTrackId = null;
-      _traceAudio('tail-protection-failed', trackId: item.id, error: error);
     }));
   }
 
@@ -353,7 +343,6 @@ class AudioHandler extends BaseAudioHandler {
     final session = await AudioSession.instance;
     if (await session.setActive(true) && (allowed?.call() ?? true)) {
       await player.resume();
-      _traceAudio('resumed', trackId: mediaItem.value?.id);
     }
   }
 
@@ -373,9 +362,7 @@ class AudioHandler extends BaseAudioHandler {
       // item and publishes idle, which tears down the system audio service.
       await player.pause();
       if (_stopped) return;
-      _traceAudio('source-loading', trackId: mediaItem.value?.id);
       await player.setSource(source);
-      _traceAudio('source-ready', trackId: mediaItem.value?.id);
       if (_stopped) return;
       if (_playWhenReady) {
         await _playReady(sourceJustLoaded: true, allowed: () => _playWhenReady);
@@ -468,9 +455,7 @@ class PlayerStateNotifier extends _$PlayerStateNotifier {
     state = state.copyWith(loading: true);
     try {
       await _audioHandler.cancelScrub();
-      _traceAudio('audio-loading', trackId: track.bvid);
       final bytes = await ref.read(trackBytesProvider(track).future);
-      _traceAudio('audio-ready', trackId: track.bvid);
       if (request != _playRequest) return;
 
       ap.Source source = ap.BytesSource(bytes);
@@ -529,16 +514,13 @@ class PlayerStateNotifier extends _$PlayerStateNotifier {
     _preparingTrackId = nextId;
     Track? next;
     try {
-      _traceAudio('prefetch-start', trackId: nextId);
       final Track target = await ref.read(trackProvider(nextId).future);
       next = target;
       if (request != _playRequest) return;
       await ref.read(trackBytesProvider(target).future);
-      _traceAudio('prefetch-ready', trackId: nextId);
-    } catch (error) {
+    } catch (_) {
       // A speculative download must not stop the current song. A real play
       // request will retry and surface its own failure if still unavailable.
-      _traceAudio('prefetch-failed', trackId: nextId, error: error);
       if (request == _playRequest) {
         // Remove a failed speculative future so a later real play can retry,
         // even when Flutter has no background frame to auto-dispose it.
@@ -561,9 +543,7 @@ class PlayerStateNotifier extends _$PlayerStateNotifier {
       state = PlayerState();
       return;
     }
-    _traceAudio('metadata-loading', trackId: trackId);
     final track = await ref.read(trackProvider(trackId).future);
-    _traceAudio('metadata-ready', trackId: trackId);
     await playTrack(track, autoplay: autoplay);
   }
 

@@ -88,26 +88,12 @@ def main():
              if row['event'] == 'networkReady'}
     assert ready['audio native-probe-2'] < ends[0]['at'], ready
     assert ready['audio native-probe-3'] < ends[1]['at'], ready
-    exported = json.loads((trace.parent / 'diagnostic-report.json').read_text())
-    native = exported['native']
-    assert native['available'] and native['appVersion'], native
-    assert 0 < len(native['events']) <= 200, native
-    assert any(event['source'] == 'native' and event['stage'] == 'native-complete'
-               for event in native['events']), native
-    assert any(event['source'] == 'dart' and event['stage'] == 'audio-ready'
-               for event in native['events']), native
-    assert any(event['stage'] == 'did-enter-background'
-               for event in native['events']), native
-    assert len(exported['dartEvents']) <= 200, exported
     saved_trace = project / '.buildlog/ios-background-playback.jsonl'
     saved_trace.parent.mkdir(exist_ok=True)
     saved_trace.write_text(trace.read_text())
-    (saved_trace.parent / 'ios-playback-diagnostics.json').write_text(
-        json.dumps(exported, ensure_ascii=False, indent=2))
     print(json.dumps({
         'firstCompletionAfterSeconds': round(first_end_seconds, 1),
         'passed': True, 'nativeCompletions': len(ends),
-        'onDeviceDiagnosticExport': True,
         'nativeLeasesBeforeDart': len(leases),
         'nowPlayingTitles': [item['title'] for item in playing],
         'nextAudioPreparedBeforeCompletion': True, 'trace': str(saved_trace)
